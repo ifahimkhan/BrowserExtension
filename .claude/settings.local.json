@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:openrouter.ai)",
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(node --check background.js)",
+      "Bash(node --check offscreen/offscreen.js)",
+      "Bash(node --check content.js)"
+    ]
+  }
+}

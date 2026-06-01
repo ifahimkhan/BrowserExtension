@@ -10,11 +10,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 // --- Load persisted prefs into the UI ---
 async function loadStoredPrefs() {
   const stored = await chrome.storage.local.get([
-    'openrouter_api_key', 'font_size', 'subtitle_position',
+    'gemini_api_key', 'font_size', 'subtitle_position',
     'chunk_interval_ms', 'requests_today'
   ]);
 
-  const hasKey = stored.openrouter_api_key && stored.openrouter_api_key.trim() !== '';
+  const hasKey = stored.gemini_api_key && stored.gemini_api_key.trim() !== '';
   if (hasKey) {
     document.getElementById('apiKeyInput').placeholder = '••••••••';
     document.getElementById('noKeyWarning').style.display = 'none';
@@ -47,8 +47,8 @@ async function refreshState() {
   const btn = document.getElementById('toggleBtn');
   const dot = document.getElementById('statusDot');
   const text = document.getElementById('statusText');
-  const { openrouter_api_key } = await chrome.storage.local.get('openrouter_api_key');
-  const hasKey = openrouter_api_key && openrouter_api_key.trim() !== '';
+  const { gemini_api_key } = await chrome.storage.local.get('gemini_api_key');
+  const hasKey = gemini_api_key && gemini_api_key.trim() !== '';
 
   if (state.isCapturing) {
     btn.textContent = '⏹ Stop Subtitles';
@@ -67,17 +67,17 @@ async function refreshState() {
 }
 
 function updateCounter(count) {
-  document.getElementById('requestCounter').textContent = `${count} / 200 requests today`;
+  document.getElementById('requestCounter').textContent = `${count} / 1500 requests today`;
 }
 
 // --- Save API key ---
 document.getElementById('saveKeyBtn').addEventListener('click', async () => {
   const key = document.getElementById('apiKeyInput').value.trim();
-  if (!key.startsWith('sk-or-') || key.length < 20) {
-    showKeyStatus('Invalid key — must start with sk-or-', 'error');
+  if (!key.startsWith('AIza') || key.length < 20) {
+    showKeyStatus('Invalid key — Google AI Studio key starts with AIza', 'error');
     return;
   }
-  await chrome.storage.local.set({ openrouter_api_key: key });
+  await chrome.storage.local.set({ gemini_api_key: key });
   document.getElementById('apiKeyInput').value = '';
   document.getElementById('apiKeyInput').placeholder = '••••••••';
   document.getElementById('noKeyWarning').style.display = 'none';

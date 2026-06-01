@@ -29,8 +29,19 @@ function getActiveVideo() {
 }
 
 // --- Overlay creation ---
+function buildShadow(host, prefs) {
+  shadowRoot = host.attachShadow({ mode: 'open' });
+
+  const style = document.createElement('style');
+  style.textContent = getSubtitleCSS(prefs);
+  shadowRoot.appendChild(style);
+
+  subtitleEl = document.createElement('div');
+  subtitleEl.className = 'st-subtitle st-hidden';
+  shadowRoot.appendChild(subtitleEl);
+}
+
 function createSubtitleOverlay(video, prefs) {
-  // Remove any existing overlay
   if (shadowHost) shadowHost.remove();
 
   shadowHost = document.createElement('div');
@@ -39,21 +50,34 @@ function createSubtitleOverlay(video, prefs) {
 
   // Insert host right after the video in the DOM
   video.insertAdjacentElement('afterend', shadowHost);
-
-  shadowRoot = shadowHost.attachShadow({ mode: 'open' });
-
-  // Inject styles into shadow root
-  const style = document.createElement('style');
-  style.textContent = getSubtitleCSS(prefs);
-  shadowRoot.appendChild(style);
-
-  // Subtitle element
-  subtitleEl = document.createElement('div');
-  subtitleEl.className = 'st-subtitle st-hidden';
-  shadowRoot.appendChild(subtitleEl);
+  buildShadow(shadowHost, prefs);
 
   // Keep overlay synced with video position
   attachResizeObserver(video);
+}
+
+// Fallback overlay covering the whole viewport when no <video> is detected.
+function createViewportOverlay(prefs) {
+  if (shadowHost) shadowHost.remove();
+
+  shadowHost = document.createElement('div');
+  shadowHost.id = 'subtranslate-host';
+  Object.assign(shadowHost.style, {
+    position: 'fixed', top: '0', left: '0',
+    width: '100vw', height: '100vh',
+    pointerEvents: 'none', zIndex: '2147483647', overflow: 'hidden'
+  });
+  document.body.appendChild(shadowHost);
+  buildShadow(shadowHost, prefs);
+}
+
+// Guarantee a live overlay exists before rendering text.
+function ensureOverlay() {
+  if (subtitleEl && shadowHost && document.documentElement.contains(shadowHost)) return true;
+  const video = getActiveVideo();
+  if (video) createSubtitleOverlay(video, currentPrefs);
+  else createViewportOverlay(currentPrefs);
+  return !!subtitleEl;
 }
 
 function applyHostStyles(host, video, prefs) {
@@ -106,7 +130,10 @@ function getSubtitleCSS(prefs) {
 
 // --- Show / hide ---
 function showSubtitle(text) {
-  if (!subtitleEl) return;
+  if (!ensureOverlay() || !subtitleEl) {
+    console.warn('[SubTranslate] No overlay target; dropping subtitle:', text);
+    return;
+  }
   clearTimeout(hideTimer);
   subtitleEl.textContent = text;
   subtitleEl.classList.remove('st-hidden');
@@ -161,11 +188,16 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (message.type === 'SUBTITLE_ERROR') {
     const errorMessages = {
-      no_api_key: '⚠️ SubTranslate: Add your OpenRouter API key in the extension popup',
+      no_api_key: '⚠️ SubTranslate: Add your Google Gemini API key in the extension popup',
       invalid_key: '⚠️ SubTranslate: Invalid API key — check the extension popup',
-      capture_failed: '⚠️ SubTranslate: Could not capture tab audio'
+      capture_failed: '⚠️ SubTranslate: Could not capture tab audio',
+      restricted_page: '⚠️ SubTranslate: This page can\'t be captured — open a normal http(s) video page',
+      tab_busy: '⚠️ SubTranslate: Tab audio already captured — reload the tab and try again',
+      api_error: '⚠️ SubTranslate: Translation API error — see service worker console'
     };
-    showSubtitle(errorMessages[message.reason] || '⚠️ SubTranslate error');
+    let text = errorMessages[message.reason] || '⚠️ SubTranslate error';
+    if (message.detail) text += ` — [${message.detail}]`;
+    showSubtitle(text);
   }
   if (message.type === 'SUBTITLE_HIDE') {
     hideSubtitle();

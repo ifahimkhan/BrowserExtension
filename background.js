@@ -40,9 +40,22 @@ async function closeOffscreenDocument() {
 async function startCapture(tabId) {
   if (isCapturing) return;
   try {
+    // tabCapture only works on real web pages — reject chrome://, the Web Store, etc.
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab.url || '';
+    const capturable = /^https?:\/\//i.test(url) || /^file:\/\//i.test(url);
+    const blocked = /^https:\/\/chrome\.google\.com\/webstore/i.test(url)
+      || /^https:\/\/chromewebstore\.google\.com/i.test(url);
+    if (!capturable || blocked) {
+      console.error('[SubTranslate] Tab not capturable:', url);
+      chrome.tabs.sendMessage(tabId, { type: 'SUBTITLE_ERROR', reason: 'restricted_page' }).catch(() => {});
+      return;
+    }
+
     await ensureOffscreenDocument();
 
-    // Get a stream ID the offscreen doc can use with getUserMedia
+    // Get a stream ID the offscreen doc can use with getUserMedia.
+    // NOTE: requires the user to have invoked the extension on THIS active tab (activeTab grant).
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
 
     // Read chunk interval from storage
@@ -64,8 +77,13 @@ async function startCapture(tabId) {
 
     console.log('[SubTranslate] Capture started for tab', tabId);
   } catch (err) {
-    console.error('[SubTranslate] startCapture failed:', err);
-    chrome.tabs.sendMessage(tabId, { type: 'SUBTITLE_ERROR', reason: 'capture_failed' });
+    const msg = (err && err.message) || String(err);
+    console.error('[SubTranslate] startCapture failed:', msg, err);
+    const reason = /active stream|already being captured/i.test(msg)
+      ? 'tab_busy'
+      : 'capture_failed';
+    // Pass the raw Chrome error to the overlay so the exact cause is visible on screen.
+    chrome.tabs.sendMessage(tabId, { type: 'SUBTITLE_ERROR', reason, detail: msg }).catch(() => {});
   }
 }
 
@@ -84,16 +102,17 @@ async function stopCapture() {
 
   isCapturing = false;
   activeCaptureTabId = null;
+  audioQueue = [];
   console.log('[SubTranslate] Capture stopped');
 }
 
-// --- OpenRouter integration ---
+// --- Google Gemini API integration ---
 async function getApiKey() {
-  const { openrouter_api_key } = await chrome.storage.local.get('openrouter_api_key');
-  if (!openrouter_api_key || openrouter_api_key.trim() === '') {
+  const { gemini_api_key } = await chrome.storage.local.get('gemini_api_key');
+  if (!gemini_api_key || gemini_api_key.trim() === '') {
     throw new Error('NO_API_KEY');
   }
-  return openrouter_api_key.trim();
+  return gemini_api_key.trim();
 }
 
 function cleanSubtitleText(text) {
@@ -107,18 +126,20 @@ function cleanSubtitleText(text) {
 }
 
 // Warn / auto-stop as the free daily quota is approached
+const DAILY_LIMIT = 1500; // Google Gemini free-tier requests/day (gemini-2.0-flash)
+
 function checkDailyLimit() {
   if (!activeCaptureTabId) return;
-  if (requestsToday >= 200) {
+  if (requestsToday >= DAILY_LIMIT) {
     chrome.tabs.sendMessage(activeCaptureTabId, {
       type: 'SUBTITLE_TEXT',
-      text: 'Daily free limit reached (200/200). Resets tomorrow.'
+      text: `Daily free limit reached (${DAILY_LIMIT}/${DAILY_LIMIT}). Resets tomorrow.`
     }).catch(() => {});
     stopCapture();
-  } else if (requestsToday >= 180) {
+  } else if (requestsToday >= DAILY_LIMIT - 20) {
     chrome.tabs.sendMessage(activeCaptureTabId, {
       type: 'SUBTITLE_TEXT',
-      text: `⚠️ ${requestsToday}/200 free requests used today`
+      text: `⚠️ ${requestsToday}/${DAILY_LIMIT} free requests used today`
     }).catch(() => {});
   }
 }
@@ -146,61 +167,111 @@ async function updateRequestCounter() {
   return count;
 }
 
-async function translateChunk(base64, format = 'webm') {
-  if (isTranslating) {
-    console.log('[SubTranslate] Skipping chunk — previous call still in flight');
+async function translateChunk(base64, format = 'wav') {
+  const apiKey = await getApiKey();
+
+  // Model is configurable via storage so it can be swapped without code edits.
+  // Default: "latest" flash alias — hot-swaps to the current model, avoids 404s
+  // when a dated model (e.g. gemini-2.0-flash) is retired. Accepts inline audio.
+  const { model_id = 'gemini-flash-latest' } =
+    await chrome.storage.local.get('model_id');
+
+  const mimeType = `audio/${format || 'wav'}`;
+  const endpoint =
+    `https://generativelanguage.googleapis.com/v1beta/models/${model_id}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: base64 } },
+            { text: 'You are a subtitle engine. Transcribe the speech in this audio clip and translate it into natural, concise English. Output ONLY the final English subtitle line — no quotes, no speaker labels, no notes, no romanization. Do NOT guess or invent words that are not clearly spoken. If there is no clear, intelligible speech, output exactly: [silence]' }
+          ]
+        }
+      ],
+      generationConfig: { maxOutputTokens: 200, temperature: 0 }
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    console.error('[SubTranslate] Gemini error', response.status, err);
+    throw Object.assign(new Error('API_ERROR'), { status: response.status, detail: err });
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+
+  await updateRequestCounter();
+  checkDailyLimit();
+
+  return text;
+}
+
+// --- Translation queue: ordered, bounded, no dropped segments mid-call ---
+let audioQueue = [];
+const MAX_QUEUE = 4; // cap backlog so subtitles stay near real-time
+
+function enqueueChunk(base64, format) {
+  audioQueue.push({ base64, format });
+  // If we're falling behind, drop the OLDEST pending clips (keep freshest speech).
+  while (audioQueue.length > MAX_QUEUE) audioQueue.shift();
+  processQueue();
+}
+
+async function processQueue() {
+  if (isTranslating) return;
+  const item = audioQueue.shift();
+  if (!item) return;
+
+  isTranslating = true;
+  try {
+    const text = await translateChunk(item.base64, item.format);
+    if (text && text !== '[silence]' && text.trim() !== '' && activeCaptureTabId) {
+      const cleaned = cleanSubtitleText(text);
+      if (cleaned) {
+        chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_TEXT', text: cleaned }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    handleTranslateError(err);
+  } finally {
+    isTranslating = false;
+    if (audioQueue.length) processQueue(); // keep draining
+  }
+}
+
+function handleTranslateError(err) {
+  console.error('[SubTranslate] translateChunk error:', err);
+  if (!activeCaptureTabId) return;
+
+  if (err.message === 'NO_API_KEY') {
+    chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_ERROR', reason: 'no_api_key' }).catch(() => {});
+    stopCapture();
     return;
   }
 
-  isTranslating = true;
+  const status = err.status;
+  const detailMsg = err.detail?.error?.message || '';
+  const keyInvalid = status === 401 || status === 403
+    || (status === 400 && /api key not valid|invalid.*key/i.test(detailMsg));
 
-  try {
-    const apiKey = await getApiKey();
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/subtranslate',  // required by OpenRouter
-        'X-Title': 'SubTranslate Extension'                  // shown in OpenRouter dashboard
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
-        max_tokens: 200,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'input_audio',
-                input_audio: { data: base64, format: format }
-              },
-              {
-                type: 'text',
-                text: 'Transcribe this audio and translate it to English. Return ONLY the English subtitle text, no explanations. If there is silence or no speech, return exactly: [silence]'
-              }
-            ]
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw Object.assign(new Error('API_ERROR'), { status: response.status, detail: err });
-    }
-
-    const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content?.trim() || '';
-
-    await updateRequestCounter();
-    checkDailyLimit();
-
-    return text;
-
-  } finally {
-    isTranslating = false;
+  if (keyInvalid) {
+    chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_ERROR', reason: 'invalid_key' }).catch(() => {});
+    stopCapture();
+  } else if (status === 429) {
+    // Rate limited — pause briefly, drop stale backlog, then resume.
+    console.warn('[SubTranslate] Rate limited by Gemini — backing off 5s');
+    audioQueue = [];
+    setTimeout(() => processQueue(), 5000);
+  } else if (status === 413) {
+    console.warn('[SubTranslate] Chunk too large — skipping');
+  } else {
+    console.error('[SubTranslate] Unhandled API error status:', status, err.detail);
+    chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_ERROR', reason: 'api_error' }).catch(() => {});
   }
 }
 
@@ -226,50 +297,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       if (!activeCaptureTabId) break;
 
-      // Watchdog: if no chunks arrive for 15s while capturing, restart offscreen
+      // Watchdog: with silence-based segmentation, long gaps are NORMAL (quiet
+      // scenes, music). Only restart after a very long dry spell that implies a
+      // genuinely stalled recorder, not just silence.
       clearTimeout(offscreenWatchdog);
       offscreenWatchdog = setTimeout(() => {
         if (isCapturing) {
-          console.warn('[SubTranslate] No audio chunks for 15s — restarting offscreen');
+          console.warn('[SubTranslate] No audio chunks for 120s — restarting offscreen');
           const tabId = activeCaptureTabId;
           stopCapture().then(() => { if (tabId) startCapture(tabId); });
         }
-      }, 15000);
+      }, 120000);
 
-      translateChunk(message.base64, message.format)
-        .then(text => {
-          if (!text || text === '[silence]' || text.trim() === '') return;
-          const cleaned = cleanSubtitleText(text);
-          if (!cleaned) return;
-          chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_TEXT', text: cleaned })
-            .catch(() => {}); // tab may have closed
-        })
-        .catch(err => {
-          console.error('[SubTranslate] translateChunk error:', err);
-
-          if (err.message === 'NO_API_KEY') {
-            chrome.tabs.sendMessage(activeCaptureTabId, {
-              type: 'SUBTITLE_ERROR',
-              reason: 'no_api_key'
-            }).catch(() => {});
-            stopCapture(); // stop so user goes back to popup
-            return;
-          }
-
-          // HTTP error handling
-          const status = err.status;
-          if (status === 401) {
-            chrome.tabs.sendMessage(activeCaptureTabId, { type: 'SUBTITLE_ERROR', reason: 'invalid_key' }).catch(() => {});
-            stopCapture();
-          } else if (status === 429) {
-            console.warn('[SubTranslate] Rate limited by OpenRouter — waiting 10s');
-            setTimeout(() => { isTranslating = false; }, 10000);
-          } else if (status === 413) {
-            console.warn('[SubTranslate] Chunk too large — skipping');
-          } else {
-            console.error('[SubTranslate] Unhandled API error status:', status);
-          }
-        });
+      // Queue the clip — never drop mid-flight; the queue preserves order.
+      enqueueChunk(message.base64, message.format);
 
       break; // don't block the listener
     }
