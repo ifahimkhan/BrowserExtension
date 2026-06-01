@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SubTranslate</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="logo">▶ SubTranslate</div>
+    <div class="tagline">Real-time AI subtitles · Free</div>
+  </div>
+
+  <div class="section" id="api-key-section">
+    <label class="label">OpenRouter API Key <span class="hint">(free at openrouter.ai)</span></label>
+    <div class="key-row">
+      <input type="password" id="apiKeyInput" placeholder="sk-or-..." autocomplete="off" />
+      <button id="saveKeyBtn">Save</button>
+    </div>
+    <div class="key-status" id="keyStatus"></div>
+    <div class="warning-banner" id="noKeyWarning">
+      ⚠️ Enter your free OpenRouter API key to start
+    </div>
+  </div>
+
+  <div class="section">
+    <button class="main-btn start" id="toggleBtn" disabled>▶ Start Subtitles</button>
+    <div class="status-row">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">No API key</span>
+    </div>
+    <div class="counter-row">
+      <span id="requestCounter">0 / 200 requests today</span>
+      <span class="counter-hint">Free daily limit</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <button class="collapse-toggle" id="settingsToggle">⚙ Settings ▾</button>
+    <div class="settings-panel" id="settingsPanel">
+      <label class="label">Font Size: <span id="fontSizeLabel">20px</span></label>
+      <input type="range" id="fontSizeSlider" min="12" max="36" value="20" />
+
+      <label class="label">Subtitle Position</label>
+      <div class="radio-row">
+        <label><input type="radio" name="position" value="bottom" checked /> Bottom</label>
+        <label><input type="radio" name="position" value="top" /> Top</label>
+      </div>
+
+      <label class="label">Chunk Size (accuracy vs speed)</label>
+      <select id="chunkSelect">
+        <option value="2000">2s — faster, rougher</option>
+        <option value="4000" selected>4s — balanced (recommended)</option>
+        <option value="6000">6s — slower, more accurate</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="footer">
+    Powered by <a href="https://openrouter.ai" target="_blank">OpenRouter</a> · Gemini 2.0 Flash (free)
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
