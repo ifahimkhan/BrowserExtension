@@ -2,7 +2,7 @@
 
 A Chrome Extension (Manifest V3) that captures tab audio, transcribes and translates it to English with an AI model, and overlays live subtitles directly on any playing video — YouTube, Vimeo, Netflix, and beyond.
 
-**100% free.** No paid APIs. You supply your own free OpenRouter API key.
+**Free.** Uses the Google Gemini API free tier. You supply your own free Google AI Studio key(s).
 
 ---
 
@@ -10,12 +10,12 @@ A Chrome Extension (Manifest V3) that captures tab audio, transcribes and transl
 
 1. The popup starts capture on the active tab.
 2. The background service worker gets a media stream ID via `chrome.tabCapture.getMediaStreamId()`.
-3. An **offscreen document** runs `MediaRecorder` (service workers can't), splitting audio into 4-second WebM chunks and converting each to base64.
-4. Each chunk goes to the background worker, which sends a single call to OpenRouter's free Gemini 2.0 Flash model — transcription **and** translation in one shot.
-5. The returned English text is pushed to the content script, which renders it in a Shadow DOM overlay on the video.
+3. An **offscreen document** captures the tab audio (service workers can't), keeps it audible, and segments speech on **silence (VAD)** — not a fixed timer — so each clip holds whole words/phrases. Each segment is encoded to 16 kHz mono WAV + base64.
+4. The background worker queues each clip and calls the Google Gemini API — transcription **and** translation in one shot.
+5. Returned English text is pushed to the content script, which renders it in a Shadow DOM overlay on the video.
 
 ```
-Tab audio → Offscreen (MediaRecorder, base64) → Background (OpenRouter) → Content (subtitle overlay)
+Tab audio → Offscreen (VAD segmenter, WAV/base64) → Background (queue → Gemini) → Content (subtitle overlay)
 ```
 
 ---
@@ -23,11 +23,13 @@ Tab audio → Offscreen (MediaRecorder, base64) → Background (OpenRouter) → 
 ## Features
 
 - Real-time English subtitles over any HTML5 video
-- Single-call pipeline (transcribe + translate together) — low latency, low quota use
-- Shadow DOM overlay — never leaks styles into the host page
-- Silence guard — chunks under 1 KB skip the API call to save quota
-- Daily request counter shown in popup (free tier: **20 req/min, 200 req/day** ≈ 13 min of video/day)
-- Settings: font size, subtitle position (top/bottom), enable/disable, chunk interval
+- Single-call pipeline (transcribe + translate together)
+- **Silence-based segmentation (VAD)** — cuts at speech pauses, not mid-word, for cleaner transcription
+- **Multi-key rotation** — paste several free Gemini keys; round-robin per request multiplies the rate ceiling
+- **Parallel, order-preserving queue** — concurrent calls (scales with key count), results emitted in order
+- Shadow DOM overlay — never leaks styles into the host page; self-healing (rebuilds on demand, viewport fallback)
+- Configurable model via storage (`model_id`) — swap without editing code
+- Settings: font size, subtitle position (top/bottom), enable/disable
 
 ---
 
@@ -37,9 +39,9 @@ Tab audio → Offscreen (MediaRecorder, base64) → Background (OpenRouter) → 
 |-------|--------|
 | Extension | Chrome MV3 |
 | Language | Vanilla JavaScript — no frameworks, no npm, no bundler |
-| Audio | `chrome.tabCapture.getMediaStreamId()` → `MediaRecorder` in offscreen doc |
-| AI model | `google/gemini-2.0-flash-exp:free` via OpenRouter |
-| Endpoint | `POST https://openrouter.ai/api/v1/chat/completions` |
+| Audio | `chrome.tabCapture.getMediaStreamId()` → `AudioContext` + VAD in offscreen doc |
+| AI model | `gemini-flash-latest` (alias, hot-swaps to current flash) via Google Gemini API |
+| Endpoint | `POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent` |
 | Storage | `chrome.storage.local` |
 
 ---
@@ -56,9 +58,11 @@ Tab audio → Offscreen (MediaRecorder, base64) → Background (OpenRouter) → 
 
 ## Setup
 
-1. Create a free OpenRouter account at <https://openrouter.ai>.
-2. Generate an API key.
-3. Open the SubTranslate popup, paste the key, and save.
+1. Create a free key at <https://aistudio.google.com/apikey> (any prefix — `AIza…` or newer `AQ…`).
+2. Open the SubTranslate popup, paste your key — **one per line** to add more for higher limits.
+3. Click **Save**.
+
+> More keys = higher throughput. Keys from different Google accounts have independent quotas.
 
 ---
 
@@ -66,10 +70,8 @@ Tab audio → Offscreen (MediaRecorder, base64) → Background (OpenRouter) → 
 
 1. Open a tab with a playing video.
 2. Click the SubTranslate icon → **Start**.
-3. Subtitles appear over the video within a few seconds.
+3. A `✅ SubTranslate active` probe appears, then subtitles as speech plays.
 4. Click **Stop** to end capture.
-
-Watch the request counter in the popup — the free tier caps at 200 requests/day.
 
 ---
 
@@ -78,12 +80,12 @@ Watch the request counter in the popup — the free tier caps at 200 requests/da
 ```
 subtranslate/
 ├── manifest.json
-├── background.js          # Service worker: capture orchestration + OpenRouter calls
-├── content.js             # Shadow DOM subtitle overlay
+├── background.js          # Service worker: capture orchestration, multi-key queue, Gemini calls
+├── content.js             # Shadow DOM subtitle overlay (self-healing)
 ├── content.css            # Empty (styles live in Shadow DOM)
 ├── offscreen/
 │   ├── offscreen.html
-│   └── offscreen.js       # MediaRecorder + chunking + base64
+│   └── offscreen.js       # tabCapture + VAD segmentation + WAV encode + base64
 ├── popup/
 │   ├── popup.html
 │   ├── popup.js
@@ -94,21 +96,36 @@ subtranslate/
     └── icon128.png
 ```
 
+See [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) for architecture detail and the optimization roadmap, and [HOW_TO_RUN.md](HOW_TO_RUN.md) for step-by-step run + troubleshooting.
+
 ---
 
 ## Architecture Notes
 
-- MV3 service workers **cannot** use `MediaRecorder` — the offscreen document is mandatory.
+- MV3 service workers **cannot** use `MediaRecorder`/`AudioContext` — the offscreen document is mandatory.
+- Tab capture mutes the tab; the offscreen doc re-routes the stream to `AudioContext.destination` to keep audio audible.
 - Content script **only** renders subtitles; it never calls the API.
-- Background worker is the **only** caller of OpenRouter.
-- No hardcoded keys, model names, or endpoint URLs in source.
+- Background worker is the **only** caller of the Gemini API.
+- No hardcoded keys in source. Model ID is configurable; endpoint is fixed to Google's API.
 - No `eval()` or remote scripts (CSP-safe).
+
+---
+
+## Tuning
+
+| Where | Knob | Effect |
+|-------|------|--------|
+| `offscreen/offscreen.js` | `SILENCE_HANG_MS` | Trailing silence that ends a segment (lower = less delay) |
+| `offscreen/offscreen.js` | `MAX_SEGMENT_MS` | Force-cut length; bounds latency / call rate |
+| `offscreen/offscreen.js` | `SILENCE_RMS` | Speech vs silence threshold |
+| `background.js` | `MAX_CONCURRENCY` | Ceiling on parallel Gemini calls |
+| `background.js` | `MAX_QUEUE` | Backlog cap before dropping oldest clips |
 
 ---
 
 ## Privacy
 
-Audio chunks are sent to OpenRouter for transcription/translation only. Your API key is stored locally in `chrome.storage.local` and never leaves your browser except as the OpenRouter auth header.
+Audio segments are sent to the Google Gemini API for transcription/translation only. Your API key(s) are stored locally in `chrome.storage.local` and never leave your browser except as the Gemini request key.
 
 ---
 
