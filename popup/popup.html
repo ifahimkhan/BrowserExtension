@@ -13,14 +13,14 @@
   </div>
 
   <div class="section" id="api-key-section">
-    <label class="label">Google Gemini API Key <span class="hint">(free at aistudio.google.com/apikey)</span></label>
+    <label class="label">Google Gemini API Key(s) <span class="hint">(one per line — more keys = higher limits)</span></label>
     <div class="key-row">
-      <input type="password" id="apiKeyInput" placeholder="AIza..." autocomplete="off" />
+      <textarea id="apiKeyInput" rows="3" placeholder="Paste key (AIza... or AQ...)&#10;optional 2nd key on next line" autocomplete="off" spellcheck="false"></textarea>
       <button id="saveKeyBtn">Save</button>
     </div>
     <div class="key-status" id="keyStatus"></div>
     <div class="warning-banner" id="noKeyWarning">
-      ⚠️ Enter your free Google Gemini API key to start
+      ⚠️ Enter at least one free Google Gemini API key to start
     </div>
   </div>
 

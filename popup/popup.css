@@ -22,8 +22,9 @@ body {
 .hint { color: #6b7280; font-weight: 400; font-size: 11px; }
 
 /* API key row */
-.key-row { display: flex; gap: 6px; }
+.key-row { display: flex; gap: 6px; align-items: flex-start; }
 input[type="password"],
+textarea,
 select {
   width: 100%;
   background: #1e1e2e;
@@ -34,7 +35,13 @@ select {
   font-size: 13px;
   outline: none;
 }
+textarea {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
 input[type="password"]:focus,
+textarea:focus,
 select:focus { border-color: #6366f1; }
 
 #saveKeyBtn {

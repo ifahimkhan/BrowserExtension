@@ -134,6 +134,8 @@ function showSubtitle(text) {
     console.warn('[SubTranslate] No overlay target; dropping subtitle:', text);
     return;
   }
+  const host = shadowHost?.getBoundingClientRect();
+  console.log('[SubTranslate] rendering subtitle; host rect:', host && `${Math.round(host.width)}x${Math.round(host.height)} @${Math.round(host.left)},${Math.round(host.top)}`);
   clearTimeout(hideTimer);
   subtitleEl.textContent = text;
   subtitleEl.classList.remove('st-hidden');
@@ -184,6 +186,7 @@ document.addEventListener('fullscreenchange', () => {
 // --- Message listener ---
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'SUBTITLE_TEXT') {
+    console.log('[SubTranslate] content received SUBTITLE_TEXT:', message.text);
     showSubtitle(message.text);
   }
   if (message.type === 'SUBTITLE_ERROR') {

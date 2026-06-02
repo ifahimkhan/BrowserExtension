@@ -10,16 +10,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 // --- Load persisted prefs into the UI ---
 async function loadStoredPrefs() {
   const stored = await chrome.storage.local.get([
-    'gemini_api_key', 'font_size', 'subtitle_position',
+    'gemini_api_keys', 'gemini_api_key', 'font_size', 'subtitle_position',
     'chunk_interval_ms', 'requests_today'
   ]);
 
-  const hasKey = stored.gemini_api_key && stored.gemini_api_key.trim() !== '';
+  const keys = getStoredKeys(stored);
+  const hasKey = keys.length > 0;
   if (hasKey) {
-    document.getElementById('apiKeyInput').placeholder = '••••••••';
+    document.getElementById('apiKeyInput').placeholder =
+      `${keys.length} key${keys.length > 1 ? 's' : ''} saved ••••••••`;
     document.getElementById('noKeyWarning').style.display = 'none';
     document.getElementById('toggleBtn').disabled = false;
-    showKeyStatus('Key saved ✓', 'success');
+    showKeyStatus(`${keys.length} key${keys.length > 1 ? 's' : ''} saved ✓`, 'success');
   } else {
     document.getElementById('noKeyWarning').style.display = 'block';
     document.getElementById('toggleBtn').disabled = true;
@@ -47,8 +49,8 @@ async function refreshState() {
   const btn = document.getElementById('toggleBtn');
   const dot = document.getElementById('statusDot');
   const text = document.getElementById('statusText');
-  const { gemini_api_key } = await chrome.storage.local.get('gemini_api_key');
-  const hasKey = gemini_api_key && gemini_api_key.trim() !== '';
+  const stored = await chrome.storage.local.get(['gemini_api_keys', 'gemini_api_key']);
+  const hasKey = getStoredKeys(stored).length > 0;
 
   if (state.isCapturing) {
     btn.textContent = '⏹ Stop Subtitles';
@@ -72,19 +74,37 @@ function updateCounter(count) {
 
 // --- Save API key ---
 document.getElementById('saveKeyBtn').addEventListener('click', async () => {
-  const key = document.getElementById('apiKeyInput').value.trim();
-  if (!key.startsWith('AIza') || key.length < 20) {
-    showKeyStatus('Invalid key — Google AI Studio key starts with AIza', 'error');
+  const raw = document.getElementById('apiKeyInput').value;
+  const keys = raw.split(/[\s,]+/).map(k => k.trim()).filter(Boolean);
+
+  if (keys.length === 0) {
+    showKeyStatus('Enter at least one key', 'error');
     return;
   }
-  await chrome.storage.local.set({ gemini_api_key: key });
+  // Google AI Studio keys vary in prefix (AIza…, AQ…). Validate length only.
+  const bad = keys.find(k => k.length < 20);
+  if (bad) {
+    showKeyStatus('Key looks too short — paste the full Google AI Studio key', 'error');
+    return;
+  }
+
+  // Store as array; clear the legacy single-key field to avoid stale fallbacks.
+  await chrome.storage.local.set({ gemini_api_keys: keys, gemini_api_key: '' });
   document.getElementById('apiKeyInput').value = '';
-  document.getElementById('apiKeyInput').placeholder = '••••••••';
+  document.getElementById('apiKeyInput').placeholder =
+    `${keys.length} key${keys.length > 1 ? 's' : ''} saved ••••••••`;
   document.getElementById('noKeyWarning').style.display = 'none';
   document.getElementById('toggleBtn').disabled = false;
-  showKeyStatus('✓ Key saved securely', 'success');
+  showKeyStatus(`✓ ${keys.length} key${keys.length > 1 ? 's' : ''} saved`, 'success');
   await refreshState();
 });
+
+// Read keys from storage: prefer the array, fall back to the legacy single key.
+function getStoredKeys(stored) {
+  let keys = Array.isArray(stored.gemini_api_keys) ? stored.gemini_api_keys : [];
+  if (keys.length === 0 && stored.gemini_api_key) keys = [stored.gemini_api_key];
+  return keys.map(k => (k || '').trim()).filter(Boolean);
+}
 
 // --- Toggle Start/Stop ---
 document.getElementById('toggleBtn').addEventListener('click', async () => {
